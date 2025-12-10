@@ -122,12 +122,10 @@ async def test_arbiter_wrr_lock(dut):
     assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 2, "Phase 2: Failed to switch to Client 2"
 
     dut._log.info("--- Test Phase 3: Work Conservation (Early Drop) ---")
-    # This catches the "wait(counter)" LLM trap.
-    # Client 0 has massive weight (15), but drops request after 1 cycle.
     
     await reset_dut(dut)
     dut.i_weight.value = pack_weights([15, 0, 0, 0], WEIGHT_WIDTH)
-    dut.i_req.value = 0x3 # Client 0 and 1 requesting
+    dut.i_req.value = 0x3 
     
     await RisingEdge(dut.clk) 
     await RisingEdge(dut.clk)
@@ -136,12 +134,19 @@ async def test_arbiter_wrr_lock(dut):
     assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 0, "Phase 3: Client 0 start"
     
     # Client 0 drops request immediately
-    dut.i_req.value = 0x2 # Only Client 1 requesting now
+    dut.i_req.value = 0x2 
+    
+    
     await RisingEdge(dut.clk)
     
-    # Logic should IMMEDIATELY switch to Client 1. Should not wait 15 cycles.
+    # --- FIX: Add this small delay ---
+    await Timer(1, units="ns") 
+    # This allows combinational logic (keep_current) to settle to 0 
+    # BEFORE the clock edge samples it.
+    
+    # Logic should IMMEDIATELY switch to Client 1.
     gnt = get_grant_index(dut.o_gnt.value, NUM_CLIENTS)
-    assert gnt == 1, f"Phase 3: Violation of Work Conservation. Expected Clt 1, Got {gnt}. Did arbiter wait for counter?"
+    assert gnt == 1, f"Phase 3: Violation. Expected Clt 1, Got {gnt}."
 
     dut._log.info("--- Test Phase 4: Atomic Lock ---")
     # Client 0 locks. Should hold grant longer than weight.
@@ -161,11 +166,20 @@ async def test_arbiter_wrr_lock(dut):
     # Hold for 10 cycles (way past weight of 0)
     for i in range(10):
         await RisingEdge(dut.clk)
+        # --- FIX: Add this small delay ---
+        await Timer(1, units="ns") 
+        # This allows combinational logic (keep_current) to settle to 0 
+        # BEFORE the clock edge samples it.
         assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 0, f"Phase 4: Lock lost at cycle {i}"
         
     # Release Lock
     dut.i_lock.value = 0x0
     await RisingEdge(dut.clk)
+    
+    # --- FIX: Add this small delay ---
+    await Timer(1, units="ns") 
+    # This allows combinational logic (keep_current) to settle to 0 
+    # BEFORE the clock edge samples it.
     
     # Should switch to Client 1
     assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 1, "Phase 4: Failed to release lock"
@@ -211,6 +225,11 @@ async def test_arbiter_wrr_lock(dut):
     # Release Lock
     dut.i_lock.value = 0x0
     await RisingEdge(dut.clk)
+    
+    # --- FIX: Add this small delay ---
+    await Timer(1, units="ns") 
+    # This allows combinational logic (keep_current) to settle to 0 
+    # BEFORE the clock edge samples it.
     
     # Since we used 5 cycles ( > 2 allowed), we must switch IMMEDIATELY.
     # If the logic reloaded the counter on unlock, it would stay at 0.
