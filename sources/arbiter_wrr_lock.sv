@@ -157,5 +157,4 @@ module arbiter_wrr_lock #(
     // Output Assignment
     // -------------------------------------------------------------------------
     assign o_gnt = current_gnt;
-
 endmodule
