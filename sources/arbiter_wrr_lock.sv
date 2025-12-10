@@ -1,5 +1,4 @@
-`default_nettype none`
-
+`timescale 1ns/1ps
 module arbiter_wrr_lock #(
     parameter int NUM_CLIENTS  = 4,
     parameter int WEIGHT_WIDTH = 4
@@ -37,7 +36,8 @@ module arbiter_wrr_lock #(
     logic                            found_next;
     logic [$clog2(NUM_CLIENTS)-1:0]  next_ptr_search;
     logic [NUM_CLIENTS-1:0]          next_gnt_search;
-
+    
+    
     // -------------------------------------------------------------------------
     // Unpack Weights
     // -------------------------------------------------------------------------
@@ -72,15 +72,20 @@ module arbiter_wrr_lock #(
     // 2. Round Robin Search (Combinational Priority Encode)
     // Scans for the next requestor starting from (current_ptr + 1)
     always_comb begin
+        int idx; // <--- MOVED HERE (Safe for Icarus)
+	
         found_next      = 1'b0;
         next_ptr_search = '0;
         next_gnt_search = '0;
 
-        // Loop N times to check all clients in order: (ptr+1), (ptr+2)... (ptr)
-        for (int i = 1; i <= NUM_CLIENTS; i++) begin
+        // Loop backwards (NUM_CLIENTS down to 1) so that the closest client 
+        // (i=1) is evaluated last. In Verilog procedural blocks, the last 
+        // assignment wins, effectively giving priority to the smallest 'i'
+        // (the immediate neighbor) without needing a 'break' statement.
+        for (int i = NUM_CLIENTS; i >= 1; i--) begin
             // Calculate index safely without expensive modulo operator
             // Logic: (a + b) % N
-            automatic int idx = int'(current_ptr) + i;
+            idx = int'(current_ptr) + i;
             if (idx >= NUM_CLIENTS) begin
                 idx = idx - NUM_CLIENTS;
             end
@@ -89,8 +94,11 @@ module arbiter_wrr_lock #(
             if (i_req[idx]) begin
                 found_next           = 1'b1;
                 next_ptr_search      = idx[$clog2(NUM_CLIENTS)-1:0];
+                
+                // Clear previous tentative grant (from a further-away client)
+                // and set the current one.
+                next_gnt_search      = '0;
                 next_gnt_search[idx] = 1'b1;
-                break; // Break on first found (Fixed Priority relative to ptr)
             end
         end
     end
@@ -149,7 +157,4 @@ module arbiter_wrr_lock #(
     // Output Assignment
     // -------------------------------------------------------------------------
     assign o_gnt = current_gnt;
-
 endmodule
-
-`default_nettype wire
