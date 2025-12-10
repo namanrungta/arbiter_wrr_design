@@ -1,0 +1,18 @@
+# Byte-compiled / cache
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Build / env
+.venv/
+.env
+
+# Waves / sim artifacts
+*.vcd
+*.fst
+results.xml
+
+# Editor
+.vscode/
+.idea/
+

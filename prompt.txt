@@ -1,0 +1,9 @@
+Design a systemverilog RTL module for Weighted Round Robin Arbiter with Atomic Lock Support based on the provided `specification.md`.
+
+The atomic lock component is critical for a high-performance bus interconnect where different agents (clients) require varying Quality of Service (QoS) guarantees and the ability to perform uninterrupted operations.
+
+The design must:
+1.  **Arbitrate** access among $N$ clients using a weighted round-robin policy.
+2.  **Support Atomic Locks**, allowing a granted client to hold the bus indefinitely for critical sections.
+3.  **Ensure Work Conservation**, preventing idle bus cycles if a granted client finishes early.
+4.  **Be Parameterized**, supporting a configurable number of clients and weight widths.

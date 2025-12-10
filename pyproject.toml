@@ -1,0 +1,16 @@
+[project]
+name = "arbiter-wrr-lock"
+version = "0.1.0"
+description = "HUD-formatted Weighted Round Robin arbiter with lock support"
+requires-python = ">=3.10"
+dependencies = [
+    "cocotb>=1.8.0",
+    "pytest>=7.0.0",
+    "pytest-xdist>=3.0.0",
+    "cocotb-tools>=0.5.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
