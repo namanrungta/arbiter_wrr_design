@@ -7,3 +7,4 @@ The design must:
 2.  **Support Atomic Locks**, allowing a granted client to hold the bus indefinitely for critical sections.
 3.  **Ensure Work Conservation**, preventing idle bus cycles if a granted client finishes early.
 4.  **Be Parameterized**, supporting a configurable number of clients and weight widths.
+5.  **Compatibility**, design must be compatible with iverilog.
