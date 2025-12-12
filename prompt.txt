@@ -1,4 +1,4 @@
-Design a systemverilog RTL module for Weighted Round Robin Arbiter with Atomic Lock Support based on the provided `specification.md`.
+Design a systemverilog RTL module for Weighted Round Robin Arbiter with Atomic Lock Support based on the provided `Specification.md`.
 
 The atomic lock component is critical for a high-performance bus interconnect where different agents (clients) require varying Quality of Service (QoS) guarantees and the ability to perform uninterrupted operations.
 

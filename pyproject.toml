@@ -6,8 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "cocotb>=1.8.0",
     "pytest>=7.0.0",
-    "pytest-xdist>=3.0.0",
-    "cocotb-tools>=0.5.0",
+    "pytest-xdist>=3.0.0"
 ]
 
 [build-system]
