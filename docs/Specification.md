@@ -39,7 +39,7 @@ The `i_weight` input is a packed array.
 
 ### 3.3 Atomic Lock Behavior
 The `i_lock` signal allows a client to override the weight counter.
-1.  If the currently granted client asserts `i_lock` (high), the arbiter must not switch ownership.The client retains the grant as long as `i_req` AND `i_lock` are high.
+1.  If the currently granted client asserts `i_lock` (high), the arbiter must not switch ownership, even if the weight counter reaches zero.The client retains the grant as long as `i_req` AND `i_lock` are high.
 2.   When `i_lock` is de-asserted the client continues using its remaining credits if any.
 
 ### 3.4 Work Conservation (Early Termination)

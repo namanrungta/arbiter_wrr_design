@@ -144,8 +144,4 @@ module arbiter_wrr_lock #(
     end
 
     assign o_gnt = current_gnt;
-initial begin
-        $dumpfile("dump.vcd");
-        $dumpvars(0, arbiter_wrr_lock);
-    end
 endmodule
