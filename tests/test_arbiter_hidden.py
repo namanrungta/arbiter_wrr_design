@@ -1,5 +1,5 @@
-import os
 import random
+import os
 from pathlib import Path
 import cocotb
 from cocotb.clock import Clock
@@ -7,259 +7,292 @@ from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
 # -----------------------------------------------------------------------------
-# HELPER FUNCTIONS
+# SHARED HELPERS & MODEL
 # -----------------------------------------------------------------------------
 
-def get_grant_index(o_gnt_val, num_clients):
-    """
-    Decodes one-hot grant signal to integer index.
-    Returns -1 if no grant or multiple grants (error).
-    """
-    val = int(o_gnt_val)
-    if val == 0:
-        return -1
-    
-    # Check for one-hot
-    if (val & (val - 1)) != 0:
-        return -2 # Error: Multiple grants
+class ArbiterModel:
+    def __init__(self, num_clients, weight_width):
+        self.num_clients = num_clients
+        self.weight_width = weight_width
+        self.rr_ptr = 0           
+        self.current_gnt = None   
+        self.counter = 0          
+
+    def predict_next(self, req_vec, lock_vec, weights_list):
+        next_gnt = self.current_gnt
         
-    # Decode
+        # 1. Check Current Owner Status
+        if self.current_gnt is not None:
+            # Work Conservation (Spec 3.4)
+            if not ((req_vec >> self.current_gnt) & 1):
+                next_gnt = None
+            else:
+                is_locked = (lock_vec >> self.current_gnt) & 1
+                if is_locked:
+                    # Lock Logic (Spec 3.3): Hold, decrement counter if > 0
+                    if self.counter > 0: self.counter -= 1
+                else:
+                    if self.counter > 0:
+                        self.counter -= 1
+                    else:
+                        next_gnt = None # Exhausted
+
+        # 2. Arbitration (if idle)
+        if next_gnt is None:
+            if self.current_gnt is not None:
+                self.rr_ptr = (self.current_gnt + 1) % self.num_clients
+                self.current_gnt = None 
+            
+            for i in range(self.num_clients):
+                candidate = (self.rr_ptr + i) % self.num_clients
+                if (req_vec >> candidate) & 1:
+                    next_gnt = candidate
+                    self.counter = weights_list[candidate]
+                    break
+        
+        self.current_gnt = next_gnt
+        return next_gnt
+
+def get_grant_index(o_gnt_val, num_clients):
+    try:
+        val = int(o_gnt_val)
+    except ValueError:
+        return -1 
+    if val == 0: return -1
+    if (val & (val - 1)) != 0: return -2 
     for i in range(num_clients):
-        if (val >> i) & 1:
-            return i
+        if (val >> i) & 1: return i
     return -1
 
-async def reset_dut(dut):
-    """Standard asynchronous reset"""
-    dut.rst_n.value = 0
-    dut.i_req.value = 0
-    dut.i_lock.value = 0
-    dut.i_weight.value = 0
-    await Timer(20, units="ns")
-    dut.rst_n.value = 1
-    await RisingEdge(dut.clk)
-
 def pack_weights(weights, width):
-    """Packs a list of integers into a single signal value"""
     packed_val = 0
     for i, w in enumerate(weights):
         packed_val |= (w & ((1 << width) - 1)) << (i * width)
     return packed_val
 
+async def setup_dut(dut):
+    """Starts clock, resets DUT, and reads parameters."""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    try:
+        N = int(dut.NUM_CLIENTS.value)
+        W = int(dut.WEIGHT_WIDTH.value)
+    except:
+        N, W = 4, 4
+        
+    dut.rst_n.value = 0
+    dut.i_req.value = 0
+    dut.i_lock.value = 0
+    dut.i_weight.value = 0
+    
+    await Timer(20, unit="ns")
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk) # Consumes the Reset Release edge
+    return N, W
+
 # -----------------------------------------------------------------------------
-# MAIN TEST
+# INDIVIDUAL TEST SCENARIOS
 # -----------------------------------------------------------------------------
 
 @cocotb.test()
-async def test_arbiter_wrr_lock(dut):
-    """
-    Hidden Grader for Weighted Round Robin Arbiter.
-    Tests specific failure modes:
-    1. Basic Rotation
-    2. Weighted Fairness
-    3. Work Conservation (Early Drop)
-    4. Illegal Lock (Lock stealing)
-    5. Lock-to-Switch Transition
-    """
+async def test_01_basic_rotation(dut):
+    """Scenario: Verify basic Round Robin rotation when weights are 0."""
+    N, W = await setup_dut(dut)
     
-    # --- Setup ---
-    NUM_CLIENTS = 4
-    WEIGHT_WIDTH = 4
-    
-    # Start Clock
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
-    
-    await reset_dut(dut)
-    
-    dut._log.info("--- Test Phase 1: Basic Round Robin (Weights=0) ---")
-    # All weights 0 => 1 cycle per turn
-    dut.i_weight.value = pack_weights([0, 0, 0, 0], WEIGHT_WIDTH)
-    dut.i_req.value = 0xF # All requesting
-    
-    # Wait for initial grant (1 cycle latency for registered outputs)
-    await RisingEdge(dut.clk) 
-    await RisingEdge(dut.clk)
-    
-    # Sequence should be 0 -> 1 -> 2 -> 3 -> 0
-    expected_sequence = [0, 1, 2, 3, 0]
-    
-    for expected_id in expected_sequence:
-        gnt_idx = get_grant_index(dut.o_gnt.value, NUM_CLIENTS)
-        assert gnt_idx == expected_id, \
-            f"[Phase 1] Expected Grant: {expected_id}, Got: {gnt_idx}. Basic rotation failed."
-        await RisingEdge(dut.clk)
+    dut.i_weight.value = pack_weights([0]*N, W)
+    dut.i_req.value = (1 << N) - 1 
 
-    dut._log.info("--- Test Phase 2: Weighted Fairness ---")
-    # Weights: 
-    # Client 0: 1 (Total 2 cycles)
-    # Client 1: 3 (Total 4 cycles)
-    # Client 2: 0 (Total 1 cycle)
-    # Client 3: 0 (Total 1 cycle)
-    dut.i_weight.value = pack_weights([1, 3, 0, 0], WEIGHT_WIDTH)
-    
-    # We are currently at the start of Client 0's turn (from previous loop end)
-    # Reset to known state to be safe or just continue. Let's Reset.
-    await reset_dut(dut)
-    dut.i_weight.value = pack_weights([1, 3, 0, 0], WEIGHT_WIDTH)
-    dut.i_req.value = 0xF
-    await RisingEdge(dut.clk) # Register reset
-    await RisingEdge(dut.clk) # Initial arbitration decision
-    
-    # Client 0 should hold for 2 cycles
-    assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 0, "Phase 2 Start: Client 0 not granted"
-    await RisingEdge(dut.clk) 
-    assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 0, "Phase 2: Client 0 dropped grant too early"
-    await RisingEdge(dut.clk)
-    
-    # Now should be Client 1 (for 4 cycles)
-    assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 1, "Phase 2: Failed to switch to Client 1"
-    for _ in range(3):
-        await RisingEdge(dut.clk)
-        assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 1, "Phase 2: Client 1 dropped grant too early"
-    
-    await RisingEdge(dut.clk)
-    # Now should be Client 2
-    assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 2, "Phase 2: Failed to switch to Client 2"
+    # REMOVED: Extra await RisingEdge(dut.clk) here.
+    # The first await inside the loop will act as the first cycle check.
 
-    dut._log.info("--- Test Phase 3: Work Conservation (Early Drop) ---")
+    for i in range(N + 1):
+        expected_id = i % N
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns") 
+        
+        gnt = get_grant_index(dut.o_gnt.value, N)
+        assert gnt == expected_id, \
+            f"Cycle {i}: Expected Grant {expected_id}, Got {gnt}"
+
+@cocotb.test()
+async def test_02_weighted_fairness(dut):
+    """Scenario: Verify clients hold grant for (Weight + 1) cycles."""
+    N, W = await setup_dut(dut)
     
-    await reset_dut(dut)
-    dut.i_weight.value = pack_weights([15, 0, 0, 0], WEIGHT_WIDTH)
-    dut.i_req.value = 0x3 
+    weights = [1, 3, 0, 0] 
+    if N > 4: weights += [0] * (N-4)
+    dut.i_weight.value = pack_weights(weights, W)
+    dut.i_req.value = (1 << N) - 1
+    
+    # REMOVED: Extra await RisingEdge(dut.clk) here.
+    
+    # C0 (Weight 1 -> 2 cycles)
+    await RisingEdge(dut.clk) # Cycle 1
+    await Timer(1, unit="ns")
+    assert get_grant_index(dut.o_gnt.value, N) == 0, "C0 failed to start"
+    
+    await RisingEdge(dut.clk) # Cycle 2
+    await Timer(1, unit="ns")
+    assert get_grant_index(dut.o_gnt.value, N) == 0, "C0 failed to hold 2nd cycle"
+    
+    # C1 (Weight 3 -> 4 cycles)
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    assert get_grant_index(dut.o_gnt.value, N) == 1, "Failed switch to C1"
+    
+    for i in range(3):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        assert get_grant_index(dut.o_gnt.value, N) == 1, f"C1 dropped early at cycle {i+2}"
+        
+    # C2 (Weight 0 -> 1 cycle)
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    assert get_grant_index(dut.o_gnt.value, N) == 2, "Failed switch to C2"
+
+@cocotb.test()
+async def test_03_work_conservation(dut):
+    """Scenario: Early Termination."""
+    N, W = await setup_dut(dut)
+    
+    dut.i_weight.value = pack_weights([15]*N, W)
+    dut.i_req.value = 0x3 # C0 & C1
     
     await RisingEdge(dut.clk) 
-    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    assert get_grant_index(dut.o_gnt.value, N) == 0
     
-    # Client 0 Granted
-    assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 0, "Phase 3: Client 0 start"
-    
-    # Client 0 drops request immediately
+    # Drop Request
     dut.i_req.value = 0x2 
-    
-    
     await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
     
-    # --- FIX: Add this small delay ---
-    await Timer(1, units="ns") 
-    # This allows combinational logic (keep_current) to settle to 0 
-    # BEFORE the clock edge samples it.
-    
-    # Logic should IMMEDIATELY switch to Client 1.
-    gnt = get_grant_index(dut.o_gnt.value, NUM_CLIENTS)
-    assert gnt == 1, f"Phase 3: Violation. Expected Clt 1, Got {gnt}."
+    gnt = get_grant_index(dut.o_gnt.value, N)
+    assert gnt == 1, f"Work Conservation failed. Expected C1, got {gnt}"
 
-    dut._log.info("--- Test Phase 4: Atomic Lock ---")
-    # Client 0 locks. Should hold grant longer than weight.
+@cocotb.test()
+async def test_04_atomic_lock_logic(dut):
+    """Scenario: Atomic Lock holding."""
+    N, W = await setup_dut(dut)
     
-    await reset_dut(dut)
-    dut.i_weight.value = 0 # Weight 0 (1 cycle default)
-    dut.i_req.value = 0x3  # Clt 0 and 1
+    dut.i_weight.value = 0 
+    dut.i_req.value = 0x3
     
     await RisingEdge(dut.clk)
-    await RisingEdge(dut.clk)
-    
-    assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 0
+    await Timer(1, unit="ns")
+    assert get_grant_index(dut.o_gnt.value, N) == 0
     
     # Assert Lock
-    dut.i_lock.value = 0x1 # Client 0 locks
+    dut.i_lock.value = 0x1
     
-    # Hold for 10 cycles (way past weight of 0)
+    # Hold for 10 cycles
     for i in range(10):
         await RisingEdge(dut.clk)
-        # --- FIX: Add this small delay ---
-        await Timer(1, units="ns") 
-        # This allows combinational logic (keep_current) to settle to 0 
-        # BEFORE the clock edge samples it.
-        assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 0, f"Phase 4: Lock lost at cycle {i}"
+        await Timer(1, unit="ns")
+        assert get_grant_index(dut.o_gnt.value, N) == 0, f"Lost grant while locked at cycle {i}"
         
     # Release Lock
     dut.i_lock.value = 0x0
     await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
     
-    # --- FIX: Add this small delay ---
-    await Timer(1, units="ns") 
-    # This allows combinational logic (keep_current) to settle to 0 
-    # BEFORE the clock edge samples it.
-    
-    # Should switch to Client 1
-    assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 1, "Phase 4: Failed to release lock"
+    assert get_grant_index(dut.o_gnt.value, N) == 1, "Failed to release after unlock"
 
-    dut._log.info("--- Test Phase 5: The 'Illegal Lock' Trap ---")
-    # Client 1 tries to 'steal' the bus from Client 0 using lock.
+@cocotb.test()
+async def test_05_illegal_lock_attempt(dut):
+    """Scenario: Lock stealing prevention."""
+    N, W = await setup_dut(dut)
     
-    await reset_dut(dut)
-    dut.i_weight.value = pack_weights([5, 0, 0, 0], WEIGHT_WIDTH) # Clt 0 has 6 cycles
+    dut.i_weight.value = pack_weights([5]*N, W) 
+    dut.i_req.value = 0x3
+    
+    await RisingEdge(dut.clk) # C0 Granted
+    
+    # Illegal Action: Client 1 asserts lock
+    dut.i_lock.value = 0x2 
+    
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    
+    gnt = get_grant_index(dut.o_gnt.value, N)
+    assert gnt == 0, f"Illegal Lock Succeeded! C0 lost bus to {gnt}"
+
+@cocotb.test()
+async def test_06_boundary_lock_extension(dut):
+    """Scenario: Lock at Counter=0 boundary."""
+    N, W = await setup_dut(dut)
+    dut.i_weight.value = 0 
     dut.i_req.value = 0x3
     
     await RisingEdge(dut.clk) 
+    
+    # Assert Lock NOW (Counter is 0)
+    dut.i_lock.value = 0x1
+    
     await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
     
-    assert get_grant_index(dut.o_gnt.value, NUM_CLIENTS) == 0
-    
-    # Client 1 asserts lock (Illegal!)
-    dut.i_lock.value = 0x2 
-    
-    # Client 0 should KEEP the grant because it has weight credits left.
-    await RisingEdge(dut.clk)
-    gnt = get_grant_index(dut.o_gnt.value, NUM_CLIENTS)
-    assert gnt == 0, f"Phase 5: Illegal Lock succeeded! Clt 0 lost grant to {gnt}."
+    assert get_grant_index(dut.o_gnt.value, N) == 0, "Lock failed to extend at Counter=0 boundary"
 
-    dut._log.info("--- Test Phase 6: Lock-to-Switch Transition ---")
-    # If we lock for 100 cycles, and weight was 2, we must switch immediately on unlock.
-    # LLMs often "reset" the counter on unlock, giving the agent free extra cycles.
+@cocotb.test()
+async def test_07_randomized_stress(dut):
+    """Scenario: Randomized stimulus vs Model."""
+    N, W = await setup_dut(dut)
+    model = ArbiterModel(N, W)
     
-    await reset_dut(dut)
-    dut.i_weight.value = pack_weights([1, 0, 0, 0], WEIGHT_WIDTH) # Clt 0 has 2 cycles
-    dut.i_req.value = 0x3
+    dut.i_weight.value = pack_weights([random.randint(0, (1<<W)-1) for _ in range(N)], W)
+    current_weights = [0]*N 
     
-    await RisingEdge(dut.clk)
-    await RisingEdge(dut.clk)
+    # Sync Model
+    model.rr_ptr = 0 # Matches RTL reset state
     
-    # Assert Lock immediately
-    dut.i_lock.value = 0x1 
-    
-    # Hold for 5 cycles
-    for _ in range(5):
+    for cycle in range(2000):
+        # 1. Randomize Inputs
+        req_vec = 0
+        lock_vec = 0
+        for i in range(N):
+            if random.random() > 0.1: req_vec |= (1 << i)
+            if random.random() > 0.95: lock_vec |= (1 << i)
+            
+        if cycle % 100 == 0:
+            current_weights = [random.randint(0, (1<<W)-1) for _ in range(N)]
+            dut.i_weight.value = pack_weights(current_weights, W)
+            
+        # Drive DUT
+        dut.i_req.value = req_vec
+        dut.i_lock.value = lock_vec
+        
+        # 2. Predict (using the inputs we just set)
+        expected = model.predict_next(req_vec, lock_vec, current_weights)
+        
+        # 3. Step
         await RisingEdge(dut.clk)
         
-    # Release Lock
-    dut.i_lock.value = 0x0
-    await RisingEdge(dut.clk)
-    
-    # --- FIX: Add this small delay ---
-    await Timer(1, units="ns") 
-    # This allows combinational logic (keep_current) to settle to 0 
-    # BEFORE the clock edge samples it.
-    
-    # Since we used 5 cycles ( > 2 allowed), we must switch IMMEDIATELY.
-    # If the logic reloaded the counter on unlock, it would stay at 0.
-    gnt = get_grant_index(dut.o_gnt.value, NUM_CLIENTS)
-    assert gnt == 1, f"Phase 6: Failed to switch after lock. Did you reload the counter?"
-
-    dut._log.info("All Hidden Tests Passed!")
+        # 4. Compare (Use Timer to settle)
+        await Timer(1, unit="ns") 
+        
+        actual = get_grant_index(dut.o_gnt.value, N)
+        
+        if expected is None and actual == -1: continue
+        
+        # Debug info
+        if actual != expected:
+            dut._log.error(f"FAIL Cycle {cycle}: Model {expected} != DUT {actual}")
+            dut._log.error(f"Inputs: Req={bin(req_vec)} Lock={bin(lock_vec)}")
+            dut._log.error(f"Model State: Ptr={model.rr_ptr} Cnt={model.counter}")
+            
+        assert actual == expected
 
 # -----------------------------------------------------------------------------
-# PYTEST RUNNER (REQUIRED FOR HUD)
+# RUNNER
 # -----------------------------------------------------------------------------
 
 def test_arbiter_hidden_runner():
-    """
-    Pytest wrapper to run the cocotb test.
-    This is required for the HUD evaluation framework to discover the test.
-    """
+    """Pytest wrapper."""
     sim = os.getenv("SIM", "icarus")
-    
-    # Path to sources - adjusting for standard structure
-    # Expected structure:
-    # /repo/
-    #   sources/arbiter_wrr_lock.sv
-    #   tests/test_arbiter_hidden.py
-    
     proj_path = Path(__file__).resolve().parent.parent
     sources = [proj_path / "sources/arbiter_wrr_lock.sv"]
 
     runner = get_runner(sim)
-    
     runner.build(
         sources=sources,
         hdl_toplevel="arbiter_wrr_lock",
@@ -268,6 +301,6 @@ def test_arbiter_hidden_runner():
 
     runner.test(
         hdl_toplevel="arbiter_wrr_lock",
-        test_module="test_arbiter_hidden", # Matches filename without .py
-        waves=True # Useful for debugging if needed
+        test_module="test_arbiter_hidden", 
+        waves=True 
     )
